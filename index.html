@@ -380,18 +380,32 @@ function drawHUD(){ctx.fillStyle='rgba(0,0,0,0.32)';ctx.fillRect(0,0,W,38);
 function heart(x,y,r){ctx.beginPath();ctx.moveTo(x,y+r*0.6);ctx.bezierCurveTo(x,y,x-r,y,x-r,y-r*0.4);ctx.bezierCurveTo(x-r,y-r,x,y-r,x,y-r*0.2);ctx.bezierCurveTo(x,y-r,x+r,y-r,x+r,y-r*0.4);ctx.bezierCurveTo(x+r,y,x,y,x,y+r*0.6);ctx.fill();}
 function roundRect(x,y,w,h,r){ctx.beginPath();ctx.moveTo(x+r,y);ctx.arcTo(x+w,y,x+w,y+h,r);ctx.arcTo(x+w,y+h,x,y+h,r);ctx.arcTo(x,y+h,x,y,r);ctx.arcTo(x,y,x+w,y,r);ctx.closePath();}
 
-/* ===== ⑧ 排行榜 (localStorage, 按通关时间排名) ===== */
-function getLB(){try{return JSON.parse(localStorage.getItem('mameLB')||'[]');}catch(e){return [];}}
+/* ===== ⑧ 排行榜 (跨设备共享: kvdb.io 云端 + localStorage 本地兜底, 按通关时间排名) ===== */
+const LB_URL='https://kvdb.io/V5xusUUMu38MVhEjiLNyab/leaderboard';
+let lbRemote=[];          // 云端缓存
+let lbStatus='';          // 'loading' | 'ok' | 'local'
+function lbLocal(){try{return JSON.parse(localStorage.getItem('mameLB')||'[]');}catch(e){return [];}}
+function lbMerge(){const seen={},out=[];                      // 合并云端+本地, 去重, 用时升序
+  for(const r of [...lbRemote,...lbLocal()]){if(!r||typeof r.t!=='number')continue;const k=(r.n||'')+'|'+r.t+'|'+r.s;if(!seen[k]){seen[k]=1;out.push(r);}}
+  out.sort((a,b)=>a.t-b.t);return out.slice(0,50);}
+function getLB(){return lbMerge();}
+function fetchLB(){lbStatus='loading';                        // 拉取云端最新
+  fetch(LB_URL,{cache:'no-store'}).then(r=>r.ok?r.json():[]).then(d=>{lbRemote=Array.isArray(d)?d:[];lbStatus='ok';}).catch(()=>{lbStatus='local';});}
+function syncLB(){                                            // read-merge-write: 拉云端→合并→写回
+  return fetch(LB_URL,{cache:'no-store'}).then(r=>r.ok?r.json():[]).catch(()=>[])
+    .then(rem=>{lbRemote=Array.isArray(rem)?rem:[];const merged=lbMerge();
+      return fetch(LB_URL,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(merged)})
+        .then(r=>{lbStatus=r.ok?'ok':'local';lbRemote=merged;}).catch(()=>{lbStatus='local';});});}
 function saveScore(){
   const t=+(totalFrames/60).toFixed(1);
   let name=(prompt('🏆 通关！用时 '+t+'秒，分数 '+score+'\n输入你的名字上排行榜:','MAME玩家')||'匿名').slice(0,10);
-  const lb=getLB();lb.push({n:name,t:t,s:score});
-  lb.sort((a,b)=>a.t-b.t);                       // 用时升序
+  const lb=lbLocal();lb.push({n:name,t:t,s:score});lb.sort((a,b)=>a.t-b.t);   // 本地先存(立即可见)
   localStorage.setItem('mameLB',JSON.stringify(lb.slice(0,20)));
   myRank={n:name,t:t,s:score};
+  syncLB();                                                  // 异步上云(失败也不影响本地)
 }
 let myRank=null,showLBPanel=false;
-function showLB(){showLBPanel=!showLBPanel;}
+function showLB(){showLBPanel=!showLBPanel;if(showLBPanel)fetchLB();}
 function drawLB(){
   const lb=getLB();ctx.fillStyle='rgba(10,10,20,0.9)';ctx.fillRect(0,0,W,H);ctx.textAlign='center';
   ctx.fillStyle='#ffe066';ctx.font='bold 30px monospace';ctx.fillText('🏆 排行榜 (按通关用时)',W/2,54);
@@ -405,7 +419,10 @@ function drawLB(){
     ctx.fillText((r.n||'匿名').slice(0,10), lx+50, y);
     ctx.fillText(r.t+'s', lx+200, y);
     ctx.fillText(String(r.s), lx+290, y);});
-  ctx.textAlign='center';ctx.fillStyle='#fff';ctx.font='14px monospace';
+  ctx.textAlign='center';ctx.font='12px monospace';
+  const sm=lbStatus==='loading'?['☁ 正在同步云端…','#9fe']:lbStatus==='ok'?['☁ 云端同步 · 全网共享','#7fe0a0']:['📵 暂用本地榜(云端未连)','#e0a06a'];
+  ctx.fillStyle=sm[1];ctx.fillText(sm[0],W/2,H-44);
+  ctx.fillStyle='#fff';ctx.font='14px monospace';
   ctx.fillText('点 🏆排行榜 按钮关闭 · 按 ↻重来 再战',W/2,H-24);ctx.textAlign='left';
 }
 
@@ -421,10 +438,22 @@ function render(){
   else if(gameState==='dead'){ctx.fillStyle='rgba(0,0,0,0.65)';ctx.fillRect(0,0,W,H);ctx.textAlign='center';ctx.fillStyle='#ff6b6b';ctx.font='bold 42px monospace';ctx.fillText('💀 失败',W/2,H/2-20);ctx.fillStyle='#fff';ctx.font='18px monospace';ctx.fillText('分数 '+score+'  关卡 '+(levelIdx+1)+'  最高连击 x'+bestCombo,W/2,H/2+24);ctx.fillText('按 ↻重来',W/2,H/2+54);ctx.textAlign='left';}
   else if(showLBPanel) drawLB();   // 游戏中也可看排行榜
 }
-function loop(){update();render();requestAnimationFrame(loop);}
+/* 固定时间步长循环: update 锁 60Hz, render 跟随显示器刷新率.
+   修复高刷屏(120/144Hz)上动作/移动整体加速的问题 — 物理不再随帧率变快 */
+const STEP=1000/60; let _lastT=0,_acc=0;
+function loop(ts){
+  requestAnimationFrame(loop);
+  if(!_lastT){_lastT=ts;render();return;}
+  let dt=ts-_lastT; _lastT=ts;
+  if(dt>250)dt=250;              // 切后台回来防止一次性大跳
+  _acc+=dt;
+  let steps=0;
+  while(_acc>=STEP&&steps<5){update();_acc-=STEP;steps++;}  // 落后时追帧, 最多5步防死亡螺旋
+  render();
+}
 function startGame(){if(gameState!=='ready')return;A.init();if(A.ctx.state==='suspended')A.ctx.resume();document.getElementById('overlay').style.display='none';gameState='play';A.startMusic(false);}
 function resetGame(){A.stopMusic();showLBPanel=false;myRank=null;startNewGame();document.getElementById('overlay').style.display='flex';}
-startNewGame();loop();
+startNewGame();fetchLB();requestAnimationFrame(loop);
 </script>
 </body>
 </html>
